@@ -40,8 +40,13 @@ defmodule Bolt.JobStore do
 
   def handle_call({:add, queue_name, job_params}, _from, state = %{conn: conn}) do
     job_id = UUID.uuid1()
-    status = Redix.command(conn, ["HSET", "#{queue_name}:jobs:id#{job_id}", "params", Poison.encode!(job_params)])
-    status = Redix.command(conn, ["LPUSH", "#{queue_name}:waiting", "#{queue_name}:jobs:id#{job_id}"])
+    Redix.pipeline!(
+      conn,
+      [
+        ["HSET", "#{queue_name}:jobs:id#{job_id}", "params", Poison.encode!(job_params)],
+        ["LPUSH", "#{queue_name}:waiting", "#{queue_name}:jobs:id#{job_id}"]
+      ]
+    )
     {:reply, {:ok, job_id}, state}
   end
 
@@ -80,9 +85,20 @@ defmodule Bolt.JobStore do
     {:reply, {:ok, remaining_count}, state}
   end
 
+  @doc """
+  Moves the backed up job into the queue to be processed. This is called once on start
+  for each of the unfinished jobs.
+  """
   def restore_backup(conn, queue_name, job_id) do
-    {:ok, job_id} = Redix.command(conn, ["RPOP", "#{queue_name}:inprogress"])
-    status = Redix.command(conn, ["LPUSH", "#{queue_name}:waiting", job_id])
+    [_, index] = Redix.pipeline!(
+      conn,
+      [
+        ["LREM", "#{queue_name}:inprogress", 0, job_id],
+        ["RPUSH", "#{queue_name}:waiting", job_id]
+      ]
+
+    )
+    {:ok, index}
   end
 
   def backup_job(conn, queue_name, nil), do: nil
